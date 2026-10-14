@@ -1,0 +1,9 @@
+# Memory-efficient Metal flash-attention for PyTorch MPS + a guarded flash_attn
+# drop-in shim. Backs patch #5 (flash_attn + fast SDPA on Apple Silicon).
+# Apple Silicon / macOS only; a no-op import elsewhere.
+mtlflashattn>=0.1.0; platform_system == "Darwin"
+
+# Build tool for the fp8-native and opt-in int4 Metal extensions. torch's
+# cpp_extension shells out to `ninja`; without it those kernels stay off and fp8
+# falls back to the decode path. The int8, attention and fused kernels don't need it.
+ninja>=1.11; platform_system == "Darwin"

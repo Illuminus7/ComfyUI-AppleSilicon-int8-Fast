@@ -1,0 +1,313 @@
+"""Patch #18: fused single-pass RMSNorm + affine + adaLN(scale,shift) + residual on MPS.
+
+out = residual + (rmsnorm(x) * weight) * (1 + scale) + shift, in one compile_shader pass:
+x and residual read once, out written once, fp32 accumulation throughout, one threadgroup
+per row. Being a separate fp32-reduction kernel with a z-tiled grid is also what keeps it
+correct past 2^21 rows, where stock MPS rms_norm returns garbage, so it SUPERSEDES
+rmsnorm_mps_large.py's fallback. DEFAULT ON (ASFP8_FUSED_NORM=off disables); never fatal,
+falling back to an exact group-aware torch composition, with `_last_backend` for tests.
+"""
+from __future__ import annotations
+
+
+import torch
+import torch.nn.functional as F
+
+TAG = "[AppleSilicon-int8-Fast/fused-norm]"
+
+_MSL = r"""
+#include <metal_stdlib>
+using namespace metal;
+
+constant constexpr uint TG    = 128;
+constant constexpr uint NSIMD = TG / 32;
+
+kernel void fused_rmsnorm_modulate(
+    device const @T@*   x        [[buffer(0)]],
+    device const @T@*   weight   [[buffer(1)]],
+    device const @T@*   scale    [[buffer(2)]],
+    device const @T@*   shift    [[buffer(3)]],
+    device const @T@*   residual [[buffer(4)]],
+    device       @T@*   out      [[buffer(5)]],
+    device const int*   meta     [[buffer(6)]],
+    device const float* epsb     [[buffer(7)]],
+    uint3 tgpig [[threadgroup_position_in_grid]],
+    uint  lid   [[thread_index_in_threadgroup]],
+    uint  sgid  [[simdgroup_index_in_threadgroup]],
+    uint  lane  [[thread_index_in_simdgroup]])
+{
+    const int   D     = meta[0];
+    const int   rpgS  = meta[1];
+    const int   rpgH  = meta[2];
+    const int   flags = meta[3];
+    const uint  ny    = uint(meta[4]);
+    const uint  rows  = uint(meta[5]);
+    const float eps   = epsb[0];
+
+    const uint  row  = tgpig.z * ny + tgpig.y;
+    if (row >= rows) return;
+    const ulong base = ulong(row) * ulong(D);
+
+    float local = 0.0f;
+    for (uint d = lid; d < uint(D); d += TG) {
+        float xv = float(x[base + d]);
+        local += xv * xv;
+    }
+    float warp = simd_sum(local);
+    threadgroup float part[NSIMD];
+    if (lane == 0) part[sgid] = warp;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgid == 0) {
+        float v = (lane < NSIMD) ? part[lane] : 0.0f;
+        float total = simd_sum(v);
+        if (lane == 0) part[0] = total;   // single writer: avoid concurrent-write UB
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float inv = rsqrt(part[0] / float(D) + eps);
+
+    const bool  hasS  = (flags & 1) != 0;
+    const bool  hasH  = (flags & 2) != 0;
+    const bool  hasR  = (flags & 4) != 0;
+    const bool  hasW  = (flags & 8) != 0;
+    const ulong sbase = hasS ? ulong(row / uint(rpgS)) * ulong(D) : 0ul;
+    const ulong hbase = hasH ? ulong(row / uint(rpgH)) * ulong(D) : 0ul;
+
+    for (uint d = lid; d < uint(D); d += TG) {
+        float y = float(x[base + d]) * inv;
+        if (hasW) y *= float(weight[d]);
+        if (hasS) y *= (1.0f + float(scale[sbase + d]));
+        if (hasH) y += float(shift[hbase + d]);
+        if (hasR) y += float(residual[base + d]);
+        out[base + d] = @T@(y);
+    }
+}
+"""
+
+_MSL_T = {torch.float16: "half", torch.bfloat16: "bfloat", torch.float32: "float"}
+_TG = 128
+_NY = 32768                      # threadgroups along grid.y per z-slab (z-tiling)
+_libs: dict[str, object] = {}
+_meta_cache: dict[tuple, torch.Tensor] = {}
+_eps_cache: dict[tuple, torch.Tensor] = {}
+_warned = False
+_last_backend = "fallback"       # "kernel" | "fallback"; set before every return (test/bench spy)
+
+
+def _get_lib(dtype):
+    t = _MSL_T[dtype]
+    lib = _libs.get(t)
+    if lib is None:
+        lib = torch.mps.compile_shader(_MSL.replace("@T@", t))
+        _libs[t] = lib
+    return lib
+
+
+def _meta(D, rpgS, rpgH, flags, ny, rows, device):
+    key = (int(D), int(rpgS), int(rpgH), int(flags), int(ny), int(rows), str(device))
+    t = _meta_cache.get(key)
+    if t is None:
+        t = torch.tensor([D, rpgS, rpgH, flags, ny, rows], dtype=torch.int32, device=device)
+        _meta_cache[key] = t
+    return t
+
+
+def _eps(eps, device):
+    key = (float(eps), str(device))
+    t = _eps_cache.get(key)
+    if t is None:
+        t = torch.tensor([float(eps)], dtype=torch.float32, device=device)
+        _eps_cache[key] = t
+    return t
+
+
+def _expand_mod(t, D, rows):
+    """Expand a modulation tensor [..., D] -> [rows, D] using the kernel's row->group map."""
+    g = t.reshape(-1, D)
+    G = g.shape[0]
+    if G == rows:
+        return g
+    if rows % G == 0:
+        return g.repeat_interleave(rows // G, dim=0)
+    return g  # indivisible: the caller's reshape raises a clear error
+
+
+def _reference(x, weight, eps, scale, shift, residual):
+    xf = x.float()
+    D = xf.shape[-1]
+    rows = xf.numel() // D
+    out = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
+    if weight is not None:
+        out = out * weight.float()
+    if scale is not None:
+        out = out * (1.0 + _expand_mod(scale.float(), D, rows).reshape(out.shape))
+    if shift is not None:
+        out = out + _expand_mod(shift.float(), D, rows).reshape(out.shape)
+    if residual is not None:
+        out = out + residual.float()
+    return out.to(x.dtype)
+
+
+def _fallback(x, weight, eps, scale, shift, residual):
+    global _last_backend
+    _last_backend = "fallback"
+    return _reference(x, weight, eps, scale, shift, residual)
+
+
+def _group(t, D, rows):
+    """Reshape a modulation tensor to [G, D] and return (contig_buffer, rows_per_group) or None."""
+    g = t.contiguous().reshape(-1, D)
+    G = g.shape[0]
+    if rows % G != 0:
+        return None
+    return g, rows // G
+
+
+def _ok_optional(t, x, *, exact_shape=None, numel=None):
+    """Validate an optional tensor matches x.device/x.dtype and a shape/numel contract."""
+    if t.device != x.device or t.dtype != x.dtype:
+        return False
+    if exact_shape is not None and tuple(t.shape) != tuple(exact_shape):
+        return False
+    if numel is not None and t.numel() != numel:
+        return False
+    return True
+
+
+def fused_rmsnorm_modulate(x, weight, eps=1e-6, scale=None, shift=None, residual=None):
+    global _last_backend
+    if x.device.type != "mps" or x.dtype not in _MSL_T or x.numel() == 0:
+        return _fallback(x, weight, eps, scale, shift, residual)
+    try:
+        D = x.shape[-1]
+        xc = x.contiguous()
+        rows = xc.numel() // D
+        dummy = torch.empty(1, dtype=x.dtype, device=x.device)
+
+        flags = 0
+        wbuf = dummy
+        if weight is not None:
+            if not _ok_optional(weight, x, numel=D):
+                return _fallback(x, weight, eps, scale, shift, residual)
+            wbuf = weight.contiguous()
+            flags |= 8
+        sbuf, rpgS = dummy, 1
+        if scale is not None:
+            if scale.device != x.device or scale.dtype != x.dtype:
+                return _fallback(x, weight, eps, scale, shift, residual)
+            grp = _group(scale, D, rows)
+            if grp is None:
+                return _fallback(x, weight, eps, scale, shift, residual)
+            sbuf, rpgS = grp[0], grp[1]
+            flags |= 1
+        hbuf, rpgH = dummy, 1
+        if shift is not None:
+            if shift.device != x.device or shift.dtype != x.dtype:
+                return _fallback(x, weight, eps, scale, shift, residual)
+            grp = _group(shift, D, rows)
+            if grp is None:
+                return _fallback(x, weight, eps, scale, shift, residual)
+            hbuf, rpgH = grp[0], grp[1]
+            flags |= 2
+        rbuf = dummy
+        if residual is not None:
+            if not _ok_optional(residual, x, exact_shape=x.shape):
+                return _fallback(x, weight, eps, scale, shift, residual)
+            rbuf = residual.contiguous()
+            flags |= 4
+
+        ny = min(rows, _NY)
+        nz = (rows + ny - 1) // ny
+        out = torch.empty_like(xc)
+        meta = _meta(D, rpgS, rpgH, flags, ny, rows, x.device)
+        epsb = _eps(eps, x.device)
+        _get_lib(x.dtype).fused_rmsnorm_modulate(
+            xc, wbuf, sbuf, hbuf, rbuf, out, meta, epsb,
+            threads=(_TG, ny, nz), group_size=(_TG, 1, 1),
+        )
+        _last_backend = "kernel"
+        return out.view_as(x)
+    except Exception as e:  # never fatal
+        global _warned
+        if not _warned:
+            print(f"{TAG} kernel error ({e}); falling back to torch composition.", flush=True)
+            _warned = True
+        return _fallback(x, weight, eps, scale, shift, residual)
+
+
+# ---- optional F.rms_norm reroute (supersedes rmsnorm_mps_large.py when installed) ----
+_orig_rms_norm = None
+_installed = False
+
+
+def _rms_norm(input, normalized_shape, weight=None, eps=None):
+    global _last_backend
+    if input.device.type != "mps" or input.dtype not in _MSL_T:
+        _last_backend = "fallback"   # so a stale "kernel" can't false-positive the spy
+        return _orig_rms_norm(input, normalized_shape, weight, eps)
+    # reduce over ALL normalized dims, so flatten the last len(normalized_shape) of them
+    D = 1
+    for d in normalized_shape:
+        D *= int(d)
+    if D <= 0 or input.numel() % D != 0:
+        _last_backend = "fallback"
+        return _orig_rms_norm(input, normalized_shape, weight, eps)
+    e = eps if eps is not None else torch.finfo(input.dtype).eps
+    x2d = input.contiguous().view(-1, D)
+    w1d = weight.contiguous().view(D) if weight is not None else None
+    out = fused_rmsnorm_modulate(x2d, w1d, e)
+    return out.view_as(input)
+
+
+_orig_rms_adaln = None
+
+
+def _rms_adaln(x, scale, shift, eps=1e-6):
+    """comfy_kitchen.rms_adaln (rmsnorm(x) * (1 + scale) + shift) in one pass: its eager
+    MPS fallback is four. Modulation rows must be per-token or per-batch."""
+    per_batch = (x.shape[0],) + (1,) * (x.dim() - 2) + (x.shape[-1],)
+    if (x.device.type == "mps" and x.dtype in _MSL_T and x.dim() >= 2
+            and all(t.device == x.device and t.dtype == x.dtype and t.shape in (x.shape, per_batch) for t in (scale, shift))):
+        return fused_rmsnorm_modulate(x, None, eps, scale, shift)
+    return _orig_rms_adaln(x, scale, shift, eps)
+
+
+def install():
+    global _orig_rms_norm, _orig_rms_adaln, _installed
+    from . import _caps
+    if _installed or not _caps.resolve("ASFP8_FUSED_NORM", default_on=True, cap=_caps.has_compile_shader):
+        return
+    if not torch.backends.mps.is_available() or not hasattr(torch.mps, "compile_shader"):
+        return
+    _orig_rms_norm = F.rms_norm
+    F.rms_norm = _rms_norm
+    torch.nn.functional.rms_norm = _rms_norm
+    try:
+        import comfy_kitchen
+        _orig_rms_adaln = comfy_kitchen.rms_adaln
+        comfy_kitchen.rms_adaln = _rms_adaln
+    except ImportError:
+        pass
+    _installed = True
+    print(f"{TAG} fused rmsnorm+modulation kernel active on MPS "
+          f"(F.rms_norm and comfy_kitchen.rms_adaln rerouted; supersedes the >2^21-row fp32 fallback).", flush=True)
+
+
+# ---- test-only install helpers: bypass the env flag so pytest exercises the reroute ----
+def install_for_test():
+    global _orig_rms_norm, _installed
+    if _installed:
+        return
+    _orig_rms_norm = F.rms_norm
+    F.rms_norm = _rms_norm
+    torch.nn.functional.rms_norm = _rms_norm
+    _installed = True
+
+
+def uninstall_for_test():
+    global _orig_rms_norm, _installed
+    if not _installed:
+        return
+    F.rms_norm = _orig_rms_norm
+    torch.nn.functional.rms_norm = _orig_rms_norm
+    _orig_rms_norm = None
+    _installed = False

@@ -3,15 +3,18 @@
 Around its matmuls a Krea2 block spends ~23 ms (of ~110) at 1536x1024 in separate MPS
 passes: fp32 copies for every RMSNorm, broadcast adaLN multiply/adds, q/k norm + RoPE,
 repeat_interleave of the GQA k/v, and the sigmoid/SiLU/residual gating. Each fused shader
-here reads its inputs once, computes in fp32 and writes once (~3 ms per block), and the
-GQA k/v go to attention un-repeated. Anything the fast path doesn't cover (reference
-latents, attention patches, masks, other dtypes/devices) runs the original forward.
+here reads its inputs once, computes in fp32 and writes once (~3 ms per block); the GQA
+k/v go to attention un-repeated, and the projections of one input share one int8
+activation quantize. Anything the fast path doesn't cover (reference latents, attention
+patches, masks, other dtypes/devices) runs the original forward.
 DEFAULT ON where compile_shader works; ASFP8_KREA2_FUSED=off disables.
 """
 
 import sys
 
 import torch
+
+from .int8_linear_kernel_mps import shared_activation
 
 TAG = "[AppleSilicon-int8-Fast/krea2]"
 
@@ -221,7 +224,9 @@ def _rmsnorm_forward(self, x):
 def _swiglu_forward(self, x):
     if not _fast(x):
         return _orig["SwiGLU"](self, x)
-    return self.down(_silu_mul(self.gate(x), self.up(x)))
+    with shared_activation(x):
+        g, u = self.gate(x), self.up(x)
+    return self.down(_silu_mul(g, u))
 
 
 def _attention_forward(self, x, freqs=None, mask=None, transformer_options={}):
@@ -230,7 +235,8 @@ def _attention_forward(self, x, freqs=None, mask=None, transformer_options={}):
             or ("block_index" in transformer_options and ("attn1_patch" in patches or "attn1_output_patch" in patches))):
         return _orig["Attention"](self, x, freqs, mask, transformer_options=transformer_options)
     import comfy.ldm.krea2.model as km
-    q, k, v, gate = self.wq(x), self.wk(x), self.wv(x), self.gate(x)
+    with shared_activation(x):
+        q, k, v, gate = self.wq(x), self.wk(x), self.wv(x), self.gate(x)
     q = _qk_norm_rope(q, self.heads, self.qknorm.qnorm, freqs)
     k = _qk_norm_rope(k, self.kvheads, self.qknorm.knorm, freqs)
     v = v.unflatten(-1, (self.kvheads, self.headdim)).transpose(1, 2)

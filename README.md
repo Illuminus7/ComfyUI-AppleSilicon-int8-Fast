@@ -16,7 +16,9 @@ This was tested with ComfyUI v0.40 and PyTorch 2.13. Future updates may break co
 
 No startup arguments are needed (Comfy Desktop's default `--enable-manager` is fine). Memory-related arguments are not recommended.
 
-Sample workflows for Krea 2, MiniMax H3 and LTX 2.5 are on Hugging Face: [Illuminus7/Comfy_Int8-Fast_Workflows](https://huggingface.co/Illuminus7/Comfy_Int8-Fast_Workflows/tree/main). Using the exact models in the workflows is recommended. Put each file in the listed folder under `ComfyUI/models/`. The image-to-video workflows need a start image of your own in the Load Image node.
+The node pack adds one node, **Load LoRA (Bypass, Optional)**: ComfyUI's bypass LoRA loader with None as the first choice, so a workflow can keep a LoRA slot and still run without a LoRA.
+
+Sample workflows for Krea 2, MiniMax H3 and LTX 2.5 are on Hugging Face: [Illuminus7/Comfy_Int8_Fast_Workflows](https://huggingface.co/Illuminus7/Comfy_Int8_Fast_Workflows/tree/main). Using the exact models in the workflows is recommended. Put each file in the listed folder under `ComfyUI/models/`. The image-to-video workflows need a start image of your own in the Load Image node.
 
 ### Krea 2
 
@@ -42,7 +44,7 @@ Sample workflows for Krea 2, MiniMax H3 and LTX 2.5 are on Hugging Face: [Illumi
 
 ### LTX 2.5
 
-`ltx2_5_t2v_mac.json` (text-to-video) and `ltx2_5_i2v_mac.json` (image-to-video) share the models. Their LoRA slot starts bypassed so they queue without one: pick a LoRA on the main node, then enable the LoRA node inside the subgraph (select it, Ctrl+B). The Lightricks repo is gated: accept its license on Hugging Face before downloading.
+`ltx2_5_t2v_mac.json` (text-to-video) and `ltx2_5_i2v_mac.json` (image-to-video) share the models. Their optional LoRA slot is set to None: pick a LoRA and its strength on the main node to use one. The Lightricks repo is gated: accept its license on Hugging Face before downloading.
 
 | File | Folder | Size | Download |
 |---|---|---|---|

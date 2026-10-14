@@ -4,13 +4,14 @@ ComfyUI imports this at startup and each patch installs itself, staying inert wh
 isn't needed. See README.md for the patch list. MIT licensed.
 """
 
-# ComfyUI looks for these on every custom node; empty = side effects only.
+# ComfyUI looks for these on every custom node; the patches below are side effects only.
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
 if __spec__ is not None and __spec__.parent:
     # __spec__.parent is "" when imported directly (pytest --import-mode=importlib),
     # where the relative imports below would fail.
+    from .nodes_lora import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
     from ._patches import attention_mps, comfykitchen_fp8, krea2_mps, minimax_h3_mps, sol_attn_mps, na3d_mps, ltx2_mps, linear_fp8, ops_bias_fp8, psutil_vmstat, rmsnorm_mps_large, scaled_mm_fp8, flash_attn_mtl, stochastic_round_fp8, tensor_to_fp8, wan_blockswap_mps, te_device_mps, lora_bypass_mps, int_mm_mps, int8_linear_mps, int8_linear_kernel_mps, fp8_linear_kernel_mps, conv_im2col_mps, wan_vae_norm_mps, mlx_textgen, fp8_mps_strided, rope_fast_mps, optrace, mps_profile, fused_norm_mps
 
     # optional patch: not present in every checkout

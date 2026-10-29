@@ -11,6 +11,8 @@ and build under a no-space directory; both are reverted on failure.
 import os
 import shutil
 
+import torch
+
 from .._extbuild import (  # noqa: F401  (re-exported for the build-lock tests)
     _abandoned_lock_cleanup,
     _build_timeout,
@@ -83,7 +85,8 @@ def module():
 
     here = os.path.dirname(os.path.abspath(__file__))
     src = os.path.join(here, "fp8_matmul2d.mm")
-    build_dir = os.path.join(_NOSPACE_ROOT, "ext")
+    # per torch version: a build linked against another libtorch must not be reloaded
+    build_dir = os.path.join(_NOSPACE_ROOT, "ext-torch" + torch.__version__)
     os.makedirs(build_dir, exist_ok=True)
     _clear_stale_lock(build_dir, "[fp8_ext]")
 

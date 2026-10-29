@@ -25,7 +25,7 @@ def native_fp8(dtype):
         try:
             ok = (torch.allclose(bits.to("mps").to(torch.float32).cpu(), bits.to(torch.float32), rtol=0, atol=0, equal_nan=True)
                   and torch.equal(x.to("mps").to(dtype).cpu().view(torch.uint8), x.to(dtype).view(torch.uint8)))
-        except RuntimeError:  # "Undefined type Float8_..." on torch without the MPS cast
+        except (RuntimeError, TypeError):  # torch without the MPS cast raises one or the other, by version
             ok = False
         _native[dtype] = ok
     return ok

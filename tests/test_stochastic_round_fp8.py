@@ -27,7 +27,7 @@ def _recorder(fail_on_mps=False):
         seen.append(value.device.type)
         if fail_on_mps and value.device.type == "mps":
             raise TypeError("Trying to convert Float8_e4m3fn to the MPS backend")
-        return torch.zeros(value.shape, dtype=dtype, device=value.device)
+        return torch.zeros(value.shape, dtype=dtype).to(value.device)  # MPS fp8 fill needs torch 2.15
 
     original.seen = seen
     return original
@@ -119,7 +119,7 @@ def test_a_transient_oom_does_not_condemn_the_session(exc):
         calls.append(value.device.type)
         if value.device.type == "mps" and len(calls) == 1:
             raise exc
-        return torch.zeros(value.shape, dtype=dtype, device=value.device)
+        return torch.zeros(value.shape, dtype=dtype).to(value.device)  # MPS fp8 fill needs torch 2.15
 
     x = torch.randn(64, device="mps")
 

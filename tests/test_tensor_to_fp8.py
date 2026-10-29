@@ -142,3 +142,20 @@ def test_fp8_casts_on_mps_match_cpu_native_or_not(dtype):
     q = src.to("mps").to(dtype)
     assert q.device.type == "mps"
     assert torch.equal(q.cpu().view(torch.uint8), src.to(dtype).view(torch.uint8))
+
+
+@requires_mps
+@pytest.mark.parametrize("exc", [RuntimeError, TypeError])
+def test_native_fp8_probe_reports_false_when_the_cast_raises(monkeypatch, exc):
+    """Older torch rejects the MPS fp8 cast with RuntimeError or TypeError depending on version."""
+    from _patches import _common
+    orig_to = torch.Tensor.to
+
+    def failing_to(self, *args, **kwargs):
+        if self.dtype in _common.FP8_DTYPES or any(a in _common.FP8_DTYPES for a in args):
+            raise exc("no fp8 cast on this MPS stack")
+        return orig_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(_common, "_native", {})
+    monkeypatch.setattr(torch.Tensor, "to", failing_to)
+    assert _common.native_fp8(torch.float8_e4m3fn) is False

@@ -7,6 +7,8 @@ space-in-path workaround as fp8_ext.
 import os
 import shutil
 
+import torch
+
 from .._extbuild import (  # noqa: F401  (re-exported for the build-lock tests)
     _abandoned_lock_cleanup,
     _build_timeout,
@@ -72,7 +74,8 @@ def module():
 
     here = os.path.dirname(os.path.abspath(__file__))
     src = os.path.join(here, "int4_matmul2d.mm")
-    build_dir = os.path.join(_NOSPACE_ROOT, "int4_ext")
+    # per torch version: a build linked against another libtorch must not be reloaded
+    build_dir = os.path.join(_NOSPACE_ROOT, "int4_ext-torch" + torch.__version__)
     os.makedirs(build_dir, exist_ok=True)
     _clear_stale_lock(build_dir, "[int4_ext]")
 

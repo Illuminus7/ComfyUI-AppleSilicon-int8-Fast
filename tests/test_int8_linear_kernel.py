@@ -95,13 +95,15 @@ def test_disabled_format_flag_still_routes(monkeypatch):
 @pytest.mark.parametrize("convrot", [False, True])
 @pytest.mark.parametrize("per_channel", [False, True])
 @pytest.mark.parametrize("bias", [False, True])
-def test_kernel_matches_float_reference(convrot, per_channel, bias):
+@pytest.mark.parametrize("M, N", [(77, 200), (20, 100), (64, 256)])
+def test_kernel_matches_float_reference(convrot, per_channel, bias, M, N):
     """W8A8 output == float math on the rotated activation, within int8 quantization noise.
-    M, N not tile multiples and K = 2 * 256 + a partial 128-wide k-step cover every edge."""
+    2*77 x 200 runs the full-tile kernel plus both edge launches (row band and column), 2*20 x 100
+    has no full tile, and 2*64 x 256 has no edge."""
     from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation
     assert patch._verify()
     g = torch.Generator().manual_seed(3)
-    M, K, N = 77, 768, 200
+    K = 768
     x = torch.randn(2, M, K, generator=g).to(torch.bfloat16)
     w = torch.randint(-127, 128, (N, K), generator=g, dtype=torch.int8)
     ws = torch.rand(N if per_channel else 1, generator=g) * 0.01 + 0.001

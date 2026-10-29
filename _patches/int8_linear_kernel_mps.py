@@ -86,17 +86,69 @@ ROTQ(rotq_f32, float)
 // D[M,N] = (A[M,K] @ B[N,K]^T) * a_scale[m] * w_scale[n or 0] (+ bias[n]), int8 operands, int32 acc.
 // Tiles run in bands of GM row tiles walking N, so threadgroups in flight share B (weight)
 // tiles in cache instead of streaming the whole weight once per row tile: 1.3-2x at 6k-16k rows.
+// Full tiles run in their own kernel with fixed-extent slices, compile-time scale layout and bias,
+// and an inline store: ~1.2x at 4k-10k rows, but only all together (a bounded path, runtime flags
+// or an out-of-line store each cost it back). The partial tiles take i8mme. K is a multiple of 256
+// (the rotate/quantize group), so the k-steps are always whole.
 constant constexpr int BM = 64, BN = 128, BK = 128, NSG = 4, GM = 32;
 
-template <typename OutT>
+template <typename OutT, bool PER_N, bool BIAS, typename C>
+inline void i8mm_store(thread C& c, device OutT* D, const device float* a_scale, const device float* w_scale,
+                       const device OutT* bias, int m0, int n0, int mr, int nr, int N) {
+  #pragma clang loop unroll(full)
+  for (uint16_t i = 0; i < c.get_capacity(); ++i) {
+    if (!c.is_valid_element(i)) continue;
+    auto idx = c.get_multidimensional_index(i);
+    const int r = int(idx[1]), cn = int(idx[0]), n = n0 + cn;
+    if (r >= mr || cn >= nr) continue;
+    float y = float(c[i]) * a_scale[m0 + r] * w_scale[PER_N ? n : 0];
+    if (BIAS) y += float(bias[n]);
+    D[ulong(m0 + r) * N + n] = OutT(y);
+  }
+}
+
+template <typename OutT, bool PER_N, bool BIAS>
 inline void i8mm(device int8_t* A, device int8_t* B, device OutT* D, const device float* a_scale,
-                 const device float* w_scale, const device OutT* bias,
-                 uint M_, uint N_, uint K_, uint ws_stride, uint has_bias, uint3 tgid) {
+                 const device float* w_scale, const device OutT* bias, uint M_, uint N_, uint K_, uint3 tgid) {
   const int M = M_, N = N_, K = K_;
-  const int tiles_m = (M + BM - 1) / BM, tiles_n = (N + BN - 1) / BN;
+  const int tiles_m = M / BM, tiles_n = N / BN;
   const int per = GM * tiles_n, first = int(tgid.x) / per * GM, t = int(tgid.x) % per, gsz = min(GM, tiles_m - first);
   const int n0 = t / gsz * BN, m0 = (first + t % gsz) * BM;
-  if (m0 >= M || n0 >= N) return;
+  constexpr auto desc = matmul2d_descriptor(BM, BN, BK, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
+  matmul2d<desc, execution_simdgroups<NSG>> op;
+  auto tA = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>(A + ulong(m0) * K, dextents<int32_t, 2>(K, BM));
+  auto tB = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>(B + ulong(n0) * K, dextents<int32_t, 2>(K, BN));
+  auto a0 = tA.slice<BK, BM>(0, 0);
+  auto b0 = tB.slice<BK, BN>(0, 0);
+  auto c = op.get_destination_cooperative_tensor<decltype(a0), decltype(b0), int>();
+  #pragma clang loop unroll(full)
+  for (uint16_t i = 0; i < c.get_capacity(); ++i) if (c.is_valid_element(i)) c[i] = 0;
+  for (int k0 = 0; k0 < K; k0 += BK) {
+    auto a = tA.slice<BK, BM>(k0, 0);
+    auto b = tB.slice<BK, BN>(k0, 0);
+    op.run(a, b, c);
+  }
+  // the store stays inline with one base pointer: through i8mm_store it costs this kernel ~20%
+  device OutT* Dp = D + ulong(m0) * N + n0;
+  #pragma clang loop unroll(full)
+  for (uint16_t i = 0; i < c.get_capacity(); ++i) {
+    if (c.is_valid_element(i)) {
+      auto idx = c.get_multidimensional_index(i);
+      float y = float(c[i]) * a_scale[m0 + idx[1]] * w_scale[PER_N ? n0 + idx[0] : 0];
+      if (BIAS) y += float(bias[n0 + idx[0]]);
+      Dp[ulong(idx[1]) * N + idx[0]] = OutT(y);
+    }
+  }
+}
+
+// the tiles i8mm leaves: the partial last row band, then the partial last column
+template <typename OutT, bool PER_N, bool BIAS>
+inline void i8mme(device int8_t* A, device int8_t* B, device OutT* D, const device float* a_scale,
+                  const device float* w_scale, const device OutT* bias, uint M_, uint N_, uint K_, uint3 tgid) {
+  const int M = M_, N = N_, K = K_;
+  const int band = M % BM ? (N + BN - 1) / BN : 0, e = int(tgid.x);
+  const int m0 = e < band ? M / BM * BM : (e - band) * BM;
+  const int n0 = e < band ? e * BN : N / BN * BN;
   constexpr auto desc = matmul2d_descriptor(BM, BN, BK, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
   matmul2d<desc, execution_simdgroups<NSG>> op;
   const int mr = min(BM, M - m0), nr = min(BN, N - n0);
@@ -107,6 +159,7 @@ inline void i8mm(device int8_t* A, device int8_t* B, device OutT* D, const devic
   using AT = __tensor_ops_detail::__remove_addrspace_t<decltype(tA0)>;
   using BT = __tensor_ops_detail::__remove_addrspace_t<decltype(tB0)>;
   auto c = op.get_destination_cooperative_tensor<AT, BT, int>();
+  #pragma clang loop unroll(full)
   for (uint16_t i = 0; i < c.get_capacity(); ++i) if (c.is_valid_element(i)) c[i] = 0;
   for (int k0 = 0; k0 < K; k0 += BK) {
     const int kk = min(BK, K - k0);
@@ -114,29 +167,29 @@ inline void i8mm(device int8_t* A, device int8_t* B, device OutT* D, const devic
     auto tB = tensor(Bp + k0, dextents<int, 2>{kk, nr}, array<int, 2>{1, K});
     op.run(tA, tB, c);
   }
-  for (uint16_t i = 0; i < c.get_capacity(); ++i) {
-    if (!c.is_valid_element(i)) continue;
-    auto idx = c.get_multidimensional_index(i);
-    const int r = int(idx[1]), n = n0 + int(idx[0]);
-    if (r >= mr || n >= N) continue;
-    float y = float(c[i]) * a_scale[m0 + r] * w_scale[n * ws_stride];
-    if (has_bias) y += float(bias[n]);
-    D[ulong(m0 + r) * N + n] = OutT(y);
-  }
+  i8mm_store<OutT, PER_N, BIAS>(c, D, a_scale, w_scale, bias, m0, n0, mr, nr, N);
 }
 
-#define I8MM(NAME, T) \
-kernel void NAME(device int8_t* A [[buffer(0)]], device int8_t* B [[buffer(1)]], device T* D [[buffer(2)]], \
+// i8mm[e]_<dtype>_<n: per-output-channel weight scale | t: per-tensor>[b: bias]
+#define I8MM_ONE(NAME, T, PER_N, BIAS) \
+kernel void i8mm_##NAME(device int8_t* A [[buffer(0)]], device int8_t* B [[buffer(1)]], device T* D [[buffer(2)]], \
                  const device float* a_scale [[buffer(3)]], const device float* w_scale [[buffer(4)]], \
                  const device T* bias [[buffer(5)]], constant uint& M [[buffer(6)]], constant uint& N [[buffer(7)]], \
-                 constant uint& K [[buffer(8)]], constant uint& ws_stride [[buffer(9)]], \
-                 constant uint& has_bias [[buffer(10)]], \
-                 uint3 tgid [[threadgroup_position_in_grid]]) { \
-  i8mm<T>(A, B, D, a_scale, w_scale, bias, M, N, K, ws_stride, has_bias, tgid); \
+                 constant uint& K [[buffer(8)]], uint3 tgid [[threadgroup_position_in_grid]]) { \
+  i8mm<T, PER_N, BIAS>(A, B, D, a_scale, w_scale, bias, M, N, K, tgid); \
+} \
+kernel void i8mme_##NAME(device int8_t* A [[buffer(0)]], device int8_t* B [[buffer(1)]], device T* D [[buffer(2)]], \
+                 const device float* a_scale [[buffer(3)]], const device float* w_scale [[buffer(4)]], \
+                 const device T* bias [[buffer(5)]], constant uint& M [[buffer(6)]], constant uint& N [[buffer(7)]], \
+                 constant uint& K [[buffer(8)]], uint3 tgid [[threadgroup_position_in_grid]]) { \
+  i8mme<T, PER_N, BIAS>(A, B, D, a_scale, w_scale, bias, M, N, K, tgid); \
 }
-I8MM(i8mm_bf16, bfloat)
-I8MM(i8mm_f16, half)
-I8MM(i8mm_f32, float)
+#define I8MM(S, T) \
+I8MM_ONE(S##_n, T, true, false) I8MM_ONE(S##_nb, T, true, true) \
+I8MM_ONE(S##_t, T, false, false) I8MM_ONE(S##_tb, T, false, true)
+I8MM(bf16, bfloat)
+I8MM(f16, half)
+I8MM(f32, float)
 """
 
 _SUFFIX = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float32: "f32"}
@@ -154,10 +207,14 @@ def _int8_matmul(a8, a_scale, w8, w_scale, bias, out_dtype):
     M, K = a8.shape
     N = w8.shape[0]
     out = torch.empty(M, N, device=a8.device, dtype=out_dtype)
-    getattr(_lib, "i8mm_" + _SUFFIX[out_dtype])(
-        a8, w8, out, a_scale, w_scale, out if bias is None else bias, M, N, K, int(w_scale.numel() > 1),
-        int(bias is not None),
-        threads=(-(-N // 128) * -(-M // 64) * 128, 1, 1), group_size=(128, 1, 1))
+    name = f"{_SUFFIX[out_dtype]}_{'n' if w_scale.numel() > 1 else 't'}{'' if bias is None else 'b'}"
+    args = (a8, w8, out, a_scale, w_scale, out if bias is None else bias, M, N, K)
+    full_m, full_n = M // 64, N // 128
+    if full_m and full_n:
+        getattr(_lib, "i8mm_" + name)(*args, threads=(full_m * full_n * 128, 1, 1), group_size=(128, 1, 1))
+    edge = (-(-N // 128) if M % 64 else 0) + (full_m if N % 128 else 0)
+    if edge:
+        getattr(_lib, "i8mme_" + name)(*args, threads=(edge * 128, 1, 1), group_size=(128, 1, 1))
     return out
 
 

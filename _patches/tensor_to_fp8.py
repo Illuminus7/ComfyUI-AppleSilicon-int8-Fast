@@ -1,7 +1,8 @@
 """Fix: tensor.to() FP8<->float conversions on MPS (third-party fp8 Linears).
 
-MPS can store and move fp8 tensors but not cast them, so wrap torch.Tensor.to: fp8 ->
-float decodes through the LUT, float -> fp8 casts on CPU and moves the storage back.
+MPS can store and move fp8 tensors but, before torch 2.15 (and still for e5m2), not cast
+them, so wrap torch.Tensor.to for the FP8 dtypes without a native cast: fp8 -> float
+decodes through the LUT, float -> fp8 casts on CPU and moves the storage back.
 Only catches Python-level .to(); fp8 promotion inside C++ ops belongs to linear_fp8.
 """
 
@@ -9,11 +10,11 @@ import sys
 
 import torch
 
-from ._common import FP8_DTYPES, decode_fp8
+from ._common import FP8_DTYPES, decode_fp8, native_fp8
 
 TAG = "[AppleSilicon-int8-Fast/tensor_to]"
 
-_FP8_SET = frozenset(FP8_DTYPES)
+_FP8_SET = frozenset()   # the FP8 dtypes MPS can't cast natively, set by install()
 _installed = False
 
 # `.float()` and friends bind straight to their own aten ops, so wrapping
@@ -61,13 +62,16 @@ def _target_has_fp8(args, kwargs):
 
 
 def install():
-    global _installed
+    global _installed, _FP8_SET
     if _installed:
         return
 
     if sys.platform != "darwin":
         return
     if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        return
+    _FP8_SET = frozenset(d for d in FP8_DTYPES if not native_fp8(d))
+    if not _FP8_SET:
         return
 
     _orig_to = torch.Tensor.to
@@ -126,5 +130,6 @@ def install():
         setattr(torch.Tensor, _name, _make_shortcut(_orig, _dtype))
 
     _installed = True
+    names = ", ".join(str(d).removeprefix("torch.") for d in FP8_DTYPES if d in _FP8_SET)
     print(f"{TAG} torch.Tensor.to (+ .float()/.half()/.bfloat16()) "
-          f"FP8<->float routed via LUT/CPU on MPS.")
+          f"{names}<->float routed via LUT/CPU on MPS.")

@@ -1,7 +1,8 @@
 """Fix: comfy_kitchen FP8 quantization on MPS (e.g. Ideogram 4).
 
-The eager backend dequantizes with plain fp8 casts, which MPS rejects; replace them
-with the LUT decode. NVFP4 dequant runs as one compile_shader pass (fp4 unpack, swizzled
+The eager backend dequantizes with plain fp8 casts, which MPS rejects before torch 2.15
+(and still for e5m2); replace them with decode_fp8, which uses the native cast where it
+exists and the LUT otherwise. NVFP4 dequant runs as one compile_shader pass (fp4 unpack, swizzled
 fp8 block scale, tensor scale); MXFP8 and the to_blocked swizzle go through the CPU.
 The registry resolves implementations by getattr() at call time, so overwriting the
 module attributes is picked up by every dispatch.
@@ -12,7 +13,7 @@ import sys
 import torch
 
 from . import _caps
-from ._common import FP8_DTYPES, decode_fp8
+from ._common import FP8_DTYPES, decode_fp8, native_fp8
 
 TAG = "[AppleSilicon-int8-Fast/comfy_kitchen]"
 
@@ -165,7 +166,9 @@ def install():
                 qmod.F8_E4M3_MAX if output_type == torch.float8_e4m3fn else qmod.F8_E5M2_MAX
             )
             temp = torch.clamp(x * (1.0 / scale).to(x.dtype), -lp_max, lp_max)
-            return temp.to("cpu").to(output_type).to(x.device)  # FP8 cast unsupported on MPS
+            if native_fp8(output_type):
+                return temp.to(output_type)
+            return temp.to("cpu").to(output_type).to(x.device)  # no MPS cast for this FP8 dtype
         return orig_quant(x, scale, output_type)
 
     for mod in (eager, qmod):

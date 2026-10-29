@@ -120,3 +120,25 @@ def test_positional_memory_format_rejected_like_stock_torch(method):
     for t in (t8, t32):
         with pytest.raises(TypeError):
             getattr(t, method)(torch.channels_last)
+
+
+@requires_mps
+def test_patch_covers_only_fp8_dtypes_without_a_native_cast():
+    """torch 2.15 casts e4m3fn natively on MPS; the patch must leave those casts to torch."""
+    from _patches._common import FP8_DTYPES, native_fp8
+    assert tensor_to_fp8._FP8_SET == {d for d in FP8_DTYPES if not native_fp8(d)}
+
+
+@requires_mps
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_fp8_casts_on_mps_match_cpu_native_or_not(dtype):
+    """Both directions are bit-exact with the CPU cast, whichever path (native, LUT, CPU) runs."""
+    from _patches._common import decode_fp8
+    raw = torch.arange(256, dtype=torch.uint8).view(dtype)
+    got = decode_fp8(raw.to("mps"), torch.float32).cpu()
+    assert torch.allclose(got, raw.to(torch.float32), rtol=0, atol=0, equal_nan=True)
+
+    src = torch.randn(512) * 300
+    q = src.to("mps").to(dtype)
+    assert q.device.type == "mps"
+    assert torch.equal(q.cpu().view(torch.uint8), src.to(dtype).view(torch.uint8))

@@ -282,7 +282,7 @@ def install():
         return  # requires PyTorch 2.4+
     _original = torch._scaled_mm
     torch._scaled_mm = _mps_scaled_mm
-    msg = f"{TAG} torch._scaled_mm FP8 on MPS via LUT decode + bf16 matrix-unit matmul."
+    msg = f"{TAG} torch._scaled_mm FP8 on MPS via FP8 decode + bf16 matrix-unit matmul."
     # comfy_kitchen prefers F.scaled_mm wherever it exists, so the seam above goes
     # dark unless this one is wrapped too
     if hasattr(torch.nn.functional, "scaled_mm"):

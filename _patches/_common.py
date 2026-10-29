@@ -1,7 +1,8 @@
 """Shared helpers: FP8 decode, and rebinding helpers that other modules import by name.
 
-MPS has no FP8 casts, so FP8 decodes via a 256-entry uint8 LUT built on CPU (where the
-cast works) and gathered on-device, which is bit-exact with a real FP8->float cast.
+torch 2.15 casts float8_e4m3fn natively on MPS; older torch (and e5m2 everywhere) has no
+MPS FP8 casts, so FP8 decodes via a 256-entry uint8 LUT built on CPU (where the cast
+works) and gathered on-device, which is bit-exact with a real FP8->float cast.
 """
 
 import sys
@@ -11,6 +12,23 @@ import torch
 FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 
 _lut_cache = {}
+_native = {}
+
+
+def native_fp8(dtype):
+    """Does MPS cast `dtype` <-> float32 natively, bit-exact with the CPU cast? Probed once.
+    Call before tensor_to_fp8 patches Tensor.to, which would make the probe test the LUT."""
+    ok = _native.get(dtype)
+    if ok is None:
+        bits = torch.arange(256, dtype=torch.uint8).view(dtype)
+        x = torch.randn(4096, generator=torch.Generator().manual_seed(0)) * 300
+        try:
+            ok = (torch.allclose(bits.to("mps").to(torch.float32).cpu(), bits.to(torch.float32), rtol=0, atol=0, equal_nan=True)
+                  and torch.equal(x.to("mps").to(dtype).cpu().view(torch.uint8), x.to(dtype).view(torch.uint8)))
+        except RuntimeError:  # "Undefined type Float8_..." on torch without the MPS cast
+            ok = False
+        _native[dtype] = ok
+    return ok
 
 
 def fp8_to_float_lut(dtype, device, out_dtype=torch.float32):
@@ -26,6 +44,8 @@ def fp8_to_float_lut(dtype, device, out_dtype=torch.float32):
 def decode_fp8(t, out_dtype=torch.float32):
     """Decode an FP8 tensor to `out_dtype` on its own device (MPS-safe)."""
     device = t.device
+    if device.type == "mps" and native_fp8(t.dtype):
+        return t.to(out_dtype)
     lut = fp8_to_float_lut(t.dtype, device, out_dtype)
     if t.is_contiguous():
         idx = t.view(torch.uint8).to(torch.long)

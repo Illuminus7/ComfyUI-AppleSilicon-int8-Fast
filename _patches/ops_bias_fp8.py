@@ -180,4 +180,4 @@ def install():
 
     ops_mod.cast_bias_weight = _mps_safe_cast_bias_weight
     _installed = True
-    print(f"{TAG} cast_bias_weight FP8 weight+bias LUT-decoded to compute dtype on MPS.")
+    print(f"{TAG} cast_bias_weight FP8 weight+bias decoded to compute dtype on MPS (native cast where torch has it, else LUT).")

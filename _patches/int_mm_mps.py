@@ -1,4 +1,5 @@
-"""Fix: torch._int_mm has no Metal kernel, so INT8 models silently run it on the CPU.
+"""Fix: torch._int_mm on MPS is missing before torch 2.15 (INT8 models silently run it on
+the CPU) and ~2 TOPS in 2.15, vs ~14 TFLOPS for a float32 GPU matmul.
 
 Does the matmul on the GPU in float32 instead. int8 x int8 sums stay far under int32
 range and the result is rescaled to bf16 downstream, so float32 error never shows.

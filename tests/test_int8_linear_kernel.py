@@ -460,3 +460,34 @@ def test_shared_activation_quantizes_once_and_matches(monkeypatch):
         patch._int8_linear_kernel(y, *ws[0], None, True)
     assert calls == [1, 1] and patch._shared is None
     assert all(torch.equal(a, b) for a, b in zip(out, ref))
+
+
+def test_quant_target_is_inert_unless_the_int8_patch_is_installed(monkeypatch):
+    """With the int8 seam off (ASFP8_INT8_EXT=off), producers must not pre-quantize: the
+    projections then take comfy's own path, which never reads the shared quantization."""
+    monkeypatch.setattr(patch, "_installed", False)
+    x = torch.zeros(2, 512, dtype=torch.bfloat16)
+    assert patch.quant_target(x, object()) is None
+
+
+@requires_int8
+def test_shared_activation_takes_the_producers_quantization(monkeypatch):
+    """A producer's quantization is used as is, an inner block on the same tensor keeps it,
+    and a layer with the other rotation setting re-quantizes."""
+    assert patch._verify()
+    g = torch.Generator().manual_seed(1)
+    x = torch.randn(70, 512, generator=g).to("mps", torch.bfloat16)
+    w = torch.randint(-127, 128, (200, 512), generator=g, dtype=torch.int8).to("mps")
+    ws = torch.full((200,), 0.01, device="mps")
+    q, scale = patch._quantize_activation(x, True)
+    want = patch._int8_linear_kernel(x, w, ws, None, True)
+    calls = []
+    real = patch._quantize_activation
+    monkeypatch.setattr(patch, "_quantize_activation", lambda x2d, r: calls.append(r) or real(x2d, r))
+    with patch.shared_activation(x, (True, q, scale)):
+        with patch.shared_activation(x):
+            assert torch.equal(patch._int8_linear_kernel(x, w, ws, None, True), want)
+        assert calls == []
+        patch._int8_linear_kernel(x, w, ws, None, False)
+        assert calls == [False]
+    assert patch._shared is None

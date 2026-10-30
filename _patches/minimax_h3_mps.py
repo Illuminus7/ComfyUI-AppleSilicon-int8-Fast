@@ -4,13 +4,17 @@ comfy_kitchen has no MPS kernel for the fused per-head q/k RMSNorm + split-half 
 runs in place on its qkv buffer, so its eager fallback costs ~40 ms per block at 20k
 tokens; the per-segment adaLN modulate is two broadcast passes; and the "swiglu" input
 act of the MLP down-projection is chunk + silu + mul. Each becomes one shader pass with
-fp32 math. Masked (per-token) modulation rows and other shapes run the original code.
+fp32 math. When fc2 runs the int8 kernel the swiglu shader also quantizes its output for it
+(~2x faster than swiglu + the separate pass at 20k tokens), so the MLP forward is replaced
+to hand that over. Masked (per-token) modulation rows and other shapes run the original code.
 DEFAULT ON where compile_shader works; ASFP8_MINIMAX_H3_FUSED=off disables.
 """
 
 import sys
 
 import torch
+
+from .int8_linear_kernel_mps import ROWQ_MSL, quant_target, shared_activation
 
 TAG = "[AppleSilicon-int8-Fast/minimax_h3]"
 
@@ -21,6 +25,7 @@ _orig = {}
 _MSL = r"""
 #include <metal_stdlib>
 using namespace metal;
+""" + ROWQ_MSL + r"""
 
 // In place on one head row of D = 32 * E elements (one simdgroup, E per lane): RMSNorm with
 // weight w, then split-half RoPE over the first rot dims with the [S, rot/2, 2, 2] table f:
@@ -77,6 +82,20 @@ kernel void swiglu_##S(const device T* x [[buffer(0)]], device T* out [[buffer(1
   const ulong e = ulong(i) * 4, r = e / F, c = e % F; \
   const float4 g = float4(*(const device vec<T, 4>*)(x + r * 2 * F + c)); \
   *(device vec<T, 4>*)(out + e) = vec<T, 4>(g / (1.0f + exp(-g)) * float4(*(const device vec<T, 4>*)(x + r * 2 * F + F + c))); \
+} \
+/* swiglu one row per threadgroup, then the int8 quantization of it (rowq) */ \
+kernel void swiglu_q_##S(const device T* x [[buffer(0)]], device T* out [[buffer(1)]], device char* q [[buffer(2)]], \
+                         device float* qs [[buffer(3)]], constant uint& F [[buffer(4)]], constant uint& rotate [[buffer(5)]], \
+                         uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
+                         uint nt [[threads_per_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], \
+                         uint lane [[thread_index_in_simdgroup]]) { \
+  threadgroup float red[32]; \
+  const ulong r = row; \
+  for (uint c = tid * 4; c < F; c += nt * 4) { \
+    const float4 g = float4(*(const device vec<T, 4>*)(x + r * 2 * F + c)); \
+    *(device vec<T, 4>*)(out + r * F + c) = vec<T, 4>(g / (1.0f + exp(-g)) * float4(*(const device vec<T, 4>*)(x + r * 2 * F + F + c))); \
+  } \
+  rowq<T>(out + r * F, q + r * F, qs + row, F, rotate, sg, nt / 32, lane, red); \
 }
 KERNELS(bf16, bfloat)
 KERNELS(f16, half)
@@ -132,6 +151,37 @@ def _mod_scale_shift(h, shift, scale, segments):
         if b > a:
             fn(h[a:b], scale[row].float().contiguous(), shift[row].float().contiguous(), D, threads=((b - a) * D // 4, 1, 1))
     return h
+
+
+def _swiglu_q(x, linear):
+    """(_swiglu(x), its int8 quantization for linear) for shared_activation, or None unless
+    linear runs the int8 kernel and the shader takes x."""
+    F = x.shape[-1] // 2
+    if x.shape[-1] % 2 or not (x.device.type == "mps" and x.dtype in _SUFFIX and x.is_contiguous()):
+        return None
+    convrot = quant_target(x[..., :F], linear)
+    if convrot is None or not _ready():
+        return None
+    rows = x.numel() // (2 * F)
+    out = torch.empty(*x.shape[:-1], F, device=x.device, dtype=x.dtype)
+    q = torch.empty(rows, F, device=x.device, dtype=torch.int8)
+    scale = torch.empty(rows, device=x.device)
+    nt = min(1024, max(32, F // 4 // 32 * 32))
+    _fn("swiglu_q", x.dtype)(x, out, q, scale, F, int(convrot), threads=(rows * nt, 1, 1), group_size=(nt, 1, 1))
+    return out, (convrot, q, scale)
+
+
+def _mlp_forward(self, x):
+    """fc2(swiglu(fc1(x))) with the swiglu shader quantizing for fc2 when that runs the int8
+    kernel; otherwise the stock linear_input_act."""
+    import comfy.ops
+    h = self.fc1(x)
+    fused = _swiglu_q(h, self.fc2)
+    if fused is None:
+        return comfy.ops.linear_input_act(self.fc2, h, "swiglu")
+    a, quantized = fused
+    with shared_activation(a, quantized):
+        return self.fc2(a)
 
 
 def _swiglu(x):
@@ -215,9 +265,12 @@ def install():
     _orig["swiglu"] = comfy.ops.INPUT_ACT_EAGER["swiglu"]
     ck.rms_rope_split_half_ = _rms_rope_split_half_
     comfy.ops.INPUT_ACT_EAGER["swiglu"] = _swiglu
+    _orig["MLP"] = hm.MLP.forward
+    hm.MLP.forward = _mlp_forward
     # block forwards (stock, and nodes that copy it such as KJ's MiniMaxLowVRAMAttention)
     # bind _mod_scale_shift by name at import
     from ._common import rebind_everywhere
     rebind_everywhere(_orig["_mod_scale_shift"], _mod_scale_shift)
     _installed = True
-    print(f"{TAG} MiniMax H3 q/k norm+RoPE, adaLN modulate and SwiGLU fused on MPS (self-check on first use).")
+    print(f"{TAG} MiniMax H3 q/k norm+RoPE, adaLN modulate and SwiGLU fused on MPS, SwiGLU also int8-quantizing "
+          f"for an int8 fc2 (self-check on first use).")

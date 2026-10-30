@@ -17,16 +17,12 @@ TAG = "[AppleSilicon-int8-Fast/int8_kernel]"
 _installed = False
 _lib = None
 
-_MSL = r"""
-#include <metal_stdlib>
-#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-using namespace metal;
-using namespace mpp::tensor_ops;
-
-// One simdgroup per row, two passes over its 256-wide groups (rotate + absmax, then rotate +
-// quantize; the second read hits cache). Lane t holds group elements t*8..t*8+7. ConvRot's
-// Hadamard is H4 (x) H4 (x) H4 (x) H4 / 16, and since H4 = J - 2*antidiag every base-4 digit
-// transforms as y_k = sum - 2*x_{3-k}.
+# Rotate + int8-quantize helpers, also compiled into the model patches' shaders so a kernel
+# producing a projection input can quantize the rows it just wrote (rowq): the same values and
+# scales as rotq on that output, without the separate pass over it.
+ROWQ_MSL = r"""
+// Lane t holds group elements t*8..t*8+7. ConvRot's Hadamard is H4 (x) H4 (x) H4 (x) H4 / 16,
+// and since H4 = J - 2*antidiag every base-4 digit transforms as y_k = sum - 2*x_{3-k}.
 inline void h4_lanes(thread float (&v)[8], ushort m1, ushort m2, ushort m3) {
   for (short j = 0; j < 8; ++j) {
     float a = simd_shuffle_xor(v[j], m1), b = simd_shuffle_xor(v[j], m2), c = simd_shuffle_xor(v[j], m3);
@@ -55,6 +51,43 @@ inline void load_group(const device T* x, uint lane, uint rotate, thread float (
   if (rotate) hadamard256(v);
 }
 
+// Rotate (when rotate) and int8-quantize one row of D (a multiple of 256) that this threadgroup
+// has just written to x; its 256-wide groups are split over the nsg simdgroups. Every thread of
+// the threadgroup must call it.
+template <typename T>
+inline void rowq(const device T* x, device char* q, device float* scale, uint D, uint rotate,
+                 uint sg, uint nsg, uint lane, threadgroup float* red) {
+  threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+  float v[8];
+  float amax = 0.0f;
+  for (uint g = sg * 256; g < D; g += nsg * 256) {
+    load_group<T>(x + g, lane, rotate, v);
+    for (short j = 0; j < 8; ++j) amax = max(amax, fabs(v[j]));
+  }
+  amax = simd_max(amax);
+  if (lane == 0) red[sg] = amax;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  amax = 0.0f;
+  for (uint i = 0; i < nsg; ++i) amax = max(amax, red[i]);
+  const float s = max(amax / 127.0f, 1e-30f), inv = 1.0f / s;
+  if (sg == 0 && lane == 0) *scale = s;
+  for (uint g = sg * 256; g < D; g += nsg * 256) {
+    load_group<T>(x + g, lane, rotate, v);
+    device char4* qv = (device char4*)(q + g + lane * 8);
+    qv[0] = char4(clamp(rint(float4(v[0], v[1], v[2], v[3]) * inv), -127.0f, 127.0f));
+    qv[1] = char4(clamp(rint(float4(v[4], v[5], v[6], v[7]) * inv), -127.0f, 127.0f));
+  }
+}
+"""
+
+_MSL = r"""
+#include <metal_stdlib>
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace metal;
+using namespace mpp::tensor_ops;
+""" + ROWQ_MSL + r"""
+// One simdgroup per row, two passes over its 256-wide groups (rotate + absmax, then rotate +
+// quantize; the second read hits cache).
 #define ROTQ(NAME, T) \
 kernel void NAME(const device T* x [[buffer(0)]], device char* q [[buffer(1)]], device float* scale [[buffer(2)]], \
                  constant uint& M [[buffer(3)]], constant uint& K [[buffer(4)]], constant uint& rotate [[buffer(5)]], \
@@ -222,15 +255,32 @@ _shared = None   # [x, convrot, q, scale] inside a shared_activation(x) block
 
 
 @contextlib.contextmanager
-def shared_activation(x):
+def shared_activation(x, quantized=None):
     """The caller promises x is not modified inside this block, so every int8 projection of
-    it (q/k/v of one input) shares one rotate + quantize."""
+    it (q/k/v of one input) shares one rotate + quantize. quantized = (convrot, q, scale)
+    from the kernel that produced x; an inner block on the same x keeps the outer one's."""
     global _shared
-    _shared = [x, None, None, None]
+    outer = _shared
+    if quantized is None and outer is not None and outer[0] is x:
+        yield
+        return
+    _shared = [x, *(quantized or (None, None, None))]
     try:
         yield
     finally:
-        _shared = None
+        _shared = outer
+
+
+def quant_target(x, *linears):
+    """The convrot flag to pre-quantize x (a projection input about to be produced, or a tensor
+    like it) with, from the first of linears that will run the W8A8 kernel on it; None if none will."""
+    if not _installed or x.dtype not in _SUFFIX or x.shape[-1] % 256:
+        return None
+    for linear in linears:
+        params = _kernel_params(linear, x)
+        if params is not None:
+            return params[1]
+    return None
 
 
 def _int8_linear_kernel(x, weight, weight_scale, bias, convrot):
@@ -271,51 +321,60 @@ def _verify():
     return True
 
 
-def _try_int8_kernel_forward(self, input):
-    """Return the layer output via the kernel W8A8 path, or None to fall back.
+def _kernel_params(self, input):
+    """(weight, convrot) when this layer's forward takes the kernel W8A8 path on input, else None.
 
     The shader is compiled only after every cheap eligibility gate passes, so a model
     with no int8 layers never pays for it.
     """
+    w = getattr(self, "weight", None)
+    if getattr(w, "_layout_cls", None) != "TensorWiseINT8Layout":
+        return None
+    from comfy_kitchen.tensor import QuantizedTensor
+
+    if not isinstance(input, torch.Tensor) or input.device.type != "mps":
+        return None
+    if isinstance(input, QuantizedTensor) or input.dtype not in _SUFFIX:
+        return None
+    if input.numel() == 0 or input.shape[-1] % 256:
+        return None
+    if not isinstance(w, QuantizedTensor):
+        return None
+    # offloaded weight: transient, so let comfy's forward cast it in rather than
+    # latch mark_kernel_failed for the session
+    if w.device.type != "mps":
+        return None
+    # only the checkpoint's own full_precision_matrix_mult opts out: comfy also sets
+    # _full_precision_mm for every int8 layer on MPS (format "disabled" there), which
+    # is exactly the case this kernel exists for
+    if getattr(self, "_full_precision_mm_config", False):
+        return None
+    # deliberately no comfy_force_cast_weights check: on a quantized weight that
+    # cast IS the per-call dequant/un-rotation this path exists to bypass
+    if len(getattr(self, "weight_function", [])) or len(getattr(self, "bias_function", [])):
+        return None
+
+    params = w._params
+    if getattr(params, "transposed", False):
+        return None
+    convrot = getattr(params, "convrot", False)
+    if convrot and getattr(params, "convrot_groupsize", 256) != 256:
+        return None
+
+    from . import _caps
+    if not _caps.kernel_ready("int8", _verify):
+        return None
+    return w, convrot
+
+
+def _try_int8_kernel_forward(self, input):
+    """Return the layer output via the kernel W8A8 path, or None to fall back."""
     try:
-        from comfy_kitchen.tensor import QuantizedTensor
-
-        if not isinstance(input, torch.Tensor) or input.device.type != "mps":
+        kp = _kernel_params(self, input)
+        if kp is None:
             return None
-        if isinstance(input, QuantizedTensor) or input.dtype not in _SUFFIX:
-            return None
-        if input.numel() == 0 or input.shape[-1] % 256:
-            return None
-
-        w = self.weight
-        if not isinstance(w, QuantizedTensor) or getattr(w, "_layout_cls", None) != "TensorWiseINT8Layout":
-            return None
-        # offloaded weight: transient, so let comfy's forward cast it in rather than
-        # latch mark_kernel_failed for the session
-        if w.device.type != "mps":
-            return None
-        # only the checkpoint's own full_precision_matrix_mult opts out: comfy also sets
-        # _full_precision_mm for every int8 layer on MPS (format "disabled" there), which
-        # is exactly the case this kernel exists for
-        if getattr(self, "_full_precision_mm_config", False):
-            return None
-        # deliberately no comfy_force_cast_weights check: on a quantized weight that
-        # cast IS the per-call dequant/un-rotation this path exists to bypass
-        if len(getattr(self, "weight_function", [])) or len(getattr(self, "bias_function", [])):
-            return None
-
-        params = w._params
-        if getattr(params, "transposed", False):
-            return None
-        convrot = getattr(params, "convrot", False)
-        if convrot and getattr(params, "convrot_groupsize", 256) != 256:
-            return None
-
-        from . import _caps
-        if not _caps.kernel_ready("int8", _verify):
-            return None
-
-        return _int8_linear_kernel(input, w._qdata, params.scale, self.bias, convrot)
+        w, convrot = kp
+        return _int8_linear_kernel(input, w._qdata, w._params.scale, self.bias, convrot)
     except Exception as e:
         # latch off: verification already passed, so this repeats on every later layer
         from . import _caps

@@ -29,6 +29,7 @@ def H():
     H._orig.setdefault("rms_rope_split_half_", comfy.quant_ops.ck.rms_rope_split_half_)
     H._orig.setdefault("_mod_scale_shift", hm._mod_scale_shift)
     H._orig.setdefault("swiglu", comfy.ops.INPUT_ACT_EAGER["swiglu"])
+    H._orig.setdefault("MLP", hm.MLP.forward)
     if H._orig["_mod_scale_shift"] is H._mod_scale_shift:
         pytest.skip("patch already installed in this process")
     return H
@@ -87,6 +88,38 @@ def test_swiglu(H):
     assert H._verify()
     x = torch.randn(11, 2 * 96, generator=torch.Generator().manual_seed(3)).to(torch.bfloat16)
     assert _err(H._swiglu(x.to("mps")), H._orig["swiglu"](x.float())) < 0.01
+
+
+@requires_mps
+@pytest.mark.parametrize("convrot", [False, True])
+@pytest.mark.parametrize("F", [256, 3072, 14336])
+def test_swiglu_q_matches_the_separate_pass(H, monkeypatch, convrot, F):
+    """swiglu_q writes the same values as swiglu, plus the exact int8 values and scales the
+    separate rotate+quantize pass (rotq) gives on them."""
+    from _patches import int8_linear_kernel_mps as I
+    assert H._verify() and I._verify()
+    monkeypatch.setattr(H, "quant_target", lambda x, *linears: convrot)
+    x = (torch.randn(50, 2 * F, generator=torch.Generator().manual_seed(F)) * 2).to("mps", torch.bfloat16)
+    plain = H._swiglu(x)
+    out, (cr, q, scale) = H._swiglu_q(x, None)
+    assert torch.equal(out, plain) and cr == convrot
+    q_ref, scale_ref = I._quantize_activation(plain, convrot)
+    assert torch.equal(q, q_ref) and torch.equal(scale, scale_ref)
+
+
+@requires_mps
+def test_mlp_forward_without_an_int8_fc2_is_the_stock_one(H):
+    """A non-int8 fc2 takes the stock linear_input_act unchanged."""
+    import comfy.ldm.minimax.model as hm
+    import comfy.ops
+    torch.manual_seed(0)
+    mlp = hm.MLP(256, 512, operations=comfy.ops.disable_weight_init)
+    for p in mlp.parameters():
+        p.data.normal_(0, 0.05)
+    mlp = mlp.to("mps", torch.bfloat16)
+    x = torch.randn(40, 256, device="mps", dtype=torch.bfloat16)
+    with torch.inference_mode():
+        assert torch.equal(H._mlp_forward(mlp, x), H._orig["MLP"](mlp, x))
 
 
 @requires_mps

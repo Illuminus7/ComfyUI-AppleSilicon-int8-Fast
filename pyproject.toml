@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-applesilicon-int8-fast"
 description = "Fast int8, fp8 and NVFP4 diffusion models in ComfyUI on Apple Silicon: Metal int8 matmul, flash and sparse attention, and fused kernels for Krea 2, MiniMax H3 and LTX 2.5, plus fixes that let quantized models run on MPS."
-version = "1.1.0"
+version = "1.2.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"

@@ -25,6 +25,10 @@ The node pack adds one node, **Load LoRA (Bypass, Optional)**: ComfyUI's bypass 
 
 Sample workflows for Krea 2, MiniMax H3 and LTX 2.5 are on Hugging Face: [Illuminus7/Comfy_Int8_Fast_Workflows](https://huggingface.co/Illuminus7/Comfy_Int8_Fast_Workflows/tree/main). Using the exact models in the workflows is recommended. Put each file in the listed folder under `ComfyUI/models/`. The image-to-video workflows need a start image of your own in the Load Image node.
 
+**INT8 attention** is on by default. It makes generation faster (about 6% for Krea 2 at 2048×2048 and 9–12% for MiniMax H3 video), but it may change images slightly: same scene and composition, with small differences in details. To turn it off, start ComfyUI with the environment variable `INT8_ATTENTION=off`:
+- from the terminal: `INT8_ATTENTION=off python main.py`
+- ComfyUI Desktop: run `launchctl setenv INT8_ATTENTION off` in the terminal, then restart ComfyUI (`launchctl unsetenv INT8_ATTENTION` turns it back on).
+
 ### Krea 2
 
 `krea2_turbo_t2i.json` needs [rgthree-comfy](https://github.com/rgthree/rgthree-comfy), installable from ComfyUI Manager. Its LoRA stack is empty by default.

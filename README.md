@@ -1,5 +1,10 @@
 This custom node is based on the original work of Paweł Mazurkiewicz ([ComfyUI-AppleSilicon-FP8](https://github.com/pawel-mazurkiewicz/ComfyUI-AppleSilicon-FP8)).
 
+A lot of speed-up ideas were taken from the amazing work of Liu Liu on Draw Things. Open source repos:
+- [draw-things-community](https://github.com/drawthingsai/draw-things-community) (Draw Things CLI)
+- [ccv](https://github.com/liuliu/ccv)
+- [s4nnc](https://github.com/liuliu/s4nnc)
+
 Proudly vibe-coded using Claude.
 
 # ComfyUI-AppleSilicon-int8-Fast
@@ -12,7 +17,7 @@ Alternative: Open the terminal, cd to your custom nodes folder, type git clone h
 
 The kernels are tuned on an M5 Max. Smaller M5 chips run the same kernels with fewer GPU cores; they should get the same relative speedups, but the large models (MiniMax H3 needs about 40 GB) won't fit in their memory.
 
-This was tested with ComfyUI v0.40 and PyTorch 2.13 to 2.15. Future updates may break compatibility.
+This was tested with ComfyUI v0.43 and PyTorch 2.13 to 2.15. Future updates may break compatibility.
 
 No startup arguments are needed (Comfy Desktop's default `--enable-manager` is fine). Memory-related arguments are not recommended.
 

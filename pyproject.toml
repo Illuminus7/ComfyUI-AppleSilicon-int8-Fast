@@ -6,6 +6,9 @@ license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"
 
+[project.urls]
+Repository = "https://github.com/Illuminus7/ComfyUI-AppleSilicon-int8-Fast"
+
 [project.optional-dependencies]
 mlx = ["mlx-vlm"]
 # Build toolchain for the ObjC++ Metal matmul kernels (fp8-native #3/#20, int4
@@ -21,5 +24,6 @@ pythonpath = [".", "tests"]
 addopts = "--import-mode=importlib"
 
 [tool.comfy]
+PublisherId = "illuminus7"
 DisplayName = "ComfyUI-AppleSilicon-int8-Fast"
 Icon = "icon.svg"

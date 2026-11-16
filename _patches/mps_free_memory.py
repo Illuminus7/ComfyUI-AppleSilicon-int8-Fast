@@ -12,10 +12,10 @@ ComfyUI then unloads enough before it samples.
   APPLESILICON_MPS_FREE_MEMORY=off      disable
 """
 
-import os
 import sys
 
 import torch
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/mps_free_memory]"
 
@@ -26,7 +26,7 @@ _limit = None
 def _allocator_limit():
     """The MPS allocator's hard limit in bytes, or None when it has none."""
     try:
-        ratio = float(os.environ.get("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "1.7"))
+        ratio = float(_env.get("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "1.7"))
     except ValueError:
         return None
     if ratio <= 0:
@@ -51,7 +51,7 @@ def install():
         return
     if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
         return
-    if os.environ.get("APPLESILICON_MPS_FREE_MEMORY", "auto").lower() in ("off", "0", "false"):
+    if _env.get("APPLESILICON_MPS_FREE_MEMORY", "auto").lower() in ("off", "0", "false"):
         print(f"{TAG} disabled by APPLESILICON_MPS_FREE_MEMORY.")
         return
     try:

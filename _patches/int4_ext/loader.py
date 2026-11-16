@@ -15,6 +15,7 @@ from .._extbuild import (  # noqa: F401  (re-exported for the build-lock tests)
     _clear_stale_lock,
     _cpp_load_guarded,
 )
+from .. import _env
 
 _mod = None
 _tried = False
@@ -44,7 +45,7 @@ def module():
         return _mod
     _tried = True
 
-    if os.environ.get("ASFP8_INT4_EXT") != "1":
+    if _env.get("ASFP8_INT4_EXT") != "1":
         return None
     if shutil.which("xcrun") is None:
         print("[int4_ext] no Metal toolchain (xcrun); int4-native disabled.")
@@ -57,7 +58,7 @@ def module():
                 os.path.dirname(ninja.__file__), "data", "bin"
             )
             if os.path.isdir(bin_dir):
-                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+                _env.prepend_path(bin_dir)
         except Exception as e:
             print(f"[int4_ext] ninja not importable ({e!r}); int4-native disabled.")
             return None

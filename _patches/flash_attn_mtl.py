@@ -10,7 +10,7 @@ gate, and any kernel error, falls back to stock SDPA.
 """
 from __future__ import annotations
 
-import os
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/flash]"
 
@@ -24,9 +24,9 @@ _LEGACY_ENV = {
 def _alias_legacy_env():
     """Mirror the legacy vars onto the new names, unless the new one is already set."""
     for old, new in _LEGACY_ENV.items():
-        val = os.environ.get(old)
-        if val is not None and new not in os.environ:
-            os.environ[new] = val
+        val = _env.get(old)
+        if val is not None and not _env.has(new):
+            _env.put(new, val)
 
 
 def install():
@@ -69,9 +69,9 @@ def install():
     if sdpa_on:
         parts.append(
             "F.scaled_dot_product_attention -> mtlflashattn on MPS "
-            f"(correctness>={os.environ.get('MTLFLASHATTN_SDPA_MIN_SEQ', '4096')} tok, "
-            f"fast-tier>={os.environ.get('MTLFLASHATTN_SDPA_FAST_MIN_SEQ', '1024')} tok, "
-            f"oom>={os.environ.get('MTLFLASHATTN_SDPA_MIN_GB', '12')} GB)"
+            f"(correctness>={_env.get('MTLFLASHATTN_SDPA_MIN_SEQ', '4096')} tok, "
+            f"fast-tier>={_env.get('MTLFLASHATTN_SDPA_FAST_MIN_SEQ', '1024')} tok, "
+            f"oom>={_env.get('MTLFLASHATTN_SDPA_MIN_GB', '12')} GB)"
         )
     if parts:
         print(f"{TAG} {'; '.join(parts)}.", flush=True)

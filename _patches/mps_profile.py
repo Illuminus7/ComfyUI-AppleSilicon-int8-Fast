@@ -8,11 +8,11 @@ serializes the GPU and slows the run ~2-4x — the relative shares are what matt
   ASFP8_PROFILE_INTERVAL=20       seconds between cumulative dumps
 """
 
-import os
 import sys
 import time
 
 import torch
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/mps_profile]"
 
@@ -201,14 +201,14 @@ def install():
     global _installed, _t_start, _t_last_dump, _interval
     if _installed:
         return
-    if os.environ.get("ASFP8_PROFILE") != "1":
+    if _env.get("ASFP8_PROFILE") != "1":
         return
     mps = getattr(torch.backends, "mps", None)
     if mps is None or not mps.is_available():
         return
 
     try:
-        _interval = float(os.environ.get("ASFP8_PROFILE_INTERVAL", "20"))
+        _interval = float(_env.get("ASFP8_PROFILE_INTERVAL", "20"))
     except ValueError:
         _interval = 20.0
 

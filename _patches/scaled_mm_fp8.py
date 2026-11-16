@@ -6,11 +6,11 @@ Metal kernel is available (DEFAULT ON, ASFP8_FP8_EXT=off disables) large e4m3 ma
 skip the decode instead.
 """
 
-import os
 
 import torch
 
 from ._common import FP8_DTYPES, decode_fp8
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/scaled_mm]"
 
@@ -49,7 +49,7 @@ def _decode(t, compute_dtype):
 def _min_dim():
     """Weight-size threshold below which the fp8-native kernel costs more than it saves."""
     try:
-        return int(os.environ.get("ASFP8_FP8_EXT_MIN_DIM", "8192"))
+        return int(_env.get("ASFP8_FP8_EXT_MIN_DIM", "8192"))
     except ValueError:
         return 8192
 

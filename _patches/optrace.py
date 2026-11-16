@@ -5,9 +5,9 @@ torch._int_mm or a plain F.linear. Logs operand dtypes and shapes on the first c
 at powers of two, then delegates unchanged. Installs last, so it sees every call.
 """
 
-import os
 
 import torch
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/optrace]"
 
@@ -43,7 +43,7 @@ def install():
     global _installed
     if _installed:
         return
-    if os.environ.get("ASFP8_TRACE_OPS") != "1":
+    if _env.get("ASFP8_TRACE_OPS") != "1":
         return
 
     import torch.nn.functional as F

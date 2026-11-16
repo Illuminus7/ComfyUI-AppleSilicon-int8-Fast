@@ -6,7 +6,7 @@ so that is the default; override with ASFP8_MLX_GEMMA3_REPO.
 """
 
 import importlib.util
-import os
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/mlx_gemma3]"
 
@@ -16,7 +16,7 @@ _MODELS = {}  # repo_id -> (model, tokenizer)
 
 
 def repo_id():
-    return os.environ.get("ASFP8_MLX_GEMMA3_REPO", DEFAULT_REPO)
+    return _env.get("ASFP8_MLX_GEMMA3_REPO", DEFAULT_REPO)
 
 
 def available():

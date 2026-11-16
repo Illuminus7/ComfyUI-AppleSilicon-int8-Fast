@@ -6,12 +6,12 @@ ever sees text, so correctness never depends on cross-tokenizer vocab alignment.
 `_ROUTES` for the encoders routed; anything else falls through to the eager generate.
 """
 
-import os
 import sys
 
 import torch
 
 from . import _mlx_gemma3, _mlx_qwen3vl
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/mlx_textgen]"
 
@@ -115,7 +115,7 @@ def _clip_generate(self, tokens, do_sample=True, max_length=256, temperature=1.0
                      repetition_penalty=repetition_penalty, seed=seed,
                      presence_penalty=presence_penalty, **extra)
 
-    if os.environ.get("ASFP8_DISABLE_MLX_TEXTGEN") == "1":
+    if _env.get("ASFP8_DISABLE_MLX_TEXTGEN") == "1":
         return orig()
     try:
         backend, tok = _route(self.cond_stage_model, self.tokenizer)

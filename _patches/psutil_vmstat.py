@@ -6,10 +6,10 @@ and `sysctl hw.memsize`, which don't use the broken syscall.
 """
 
 import collections
-import os
 import re
 import subprocess
 import sys
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/psutil]"
 
@@ -72,7 +72,7 @@ def _is_broken(psutil, attempts=24):
 
 def _mode():
     """Read APPLESILICON_FP8_PSUTIL: 'auto' (default), 'on'/'force', or 'off'."""
-    v = os.environ.get("APPLESILICON_FP8_PSUTIL", "auto").strip().lower()
+    v = _env.get("APPLESILICON_FP8_PSUTIL", "auto").strip().lower()
     if v in ("0", "off", "false", "no", "disable", "disabled"):
         return "off"
     if v in ("1", "on", "true", "yes", "force", "forced"):

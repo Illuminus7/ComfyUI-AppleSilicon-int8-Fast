@@ -5,17 +5,17 @@ lowered patch buffer stays under ASFP8_CONV_TILE_MB. conv3d is ON by default; co
 is not (stock conv2d is already at roofline). ASFP8_CONV_IM2COL=off kills it, =2d or
 =2d,3d opts conv2d in. Any compile/kernel/shape failure falls back to stock conv.
 """
-import os
 
 import torch
 import torch.nn.functional as F
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/conv]"
 
 def _tile_mb():
     # parsed at import, before the install guards run, so it must never raise
     try:
-        return max(1, int(os.environ.get("ASFP8_CONV_TILE_MB", "384")))
+        return max(1, int(_env.get("ASFP8_CONV_TILE_MB", "384")))
     except (TypeError, ValueError):
         return 384
 
@@ -267,7 +267,7 @@ def _gemm_nt_bias(A, Bw, bias, out=None):
 
 
 def _scatter_on():
-    return os.environ.get("ASFP8_CONV_SCATTER", "1").lower() in ("1", "on", "true")
+    return _env.get("ASFP8_CONV_SCATTER", "1").lower() in ("1", "on", "true")
 
 
 def _gemm_nt_bias_scatter(A, Bw, bias, out, p0, Cout, Dout, Hout, Wout):
@@ -409,7 +409,7 @@ _CONV_BOTH = ("1", "on", "true", "all", "both", "2d,3d", "3d,2d")
 
 
 def _mode():
-    return os.environ.get("ASFP8_CONV_IM2COL", "3d").strip().lower()
+    return _env.get("ASFP8_CONV_IM2COL", "3d").strip().lower()
 
 
 def _gate():
@@ -417,7 +417,7 @@ def _gate():
     if mode in _CONV_OFF:
         return False
     # an explicit mode forces it on; the wrapper still falls back per call
-    if os.environ.get("ASFP8_CONV_IM2COL") is None:
+    if _env.get("ASFP8_CONV_IM2COL") is None:
         from . import _caps
         if not _caps.has_tensor_ops_matmul2d():
             return False

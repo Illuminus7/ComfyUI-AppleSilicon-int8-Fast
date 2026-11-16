@@ -7,11 +7,11 @@ make every block resident with the offload flags cleared. ASFP8_NEUTRALIZE_BLOCK
 disables. WanVideoWrapper imports after us, hence the post-import hook.
 """
 
-import os
 import sys
 import importlib.abc
 
 import torch
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/wan_blockswap]"
 
@@ -20,7 +20,7 @@ _installed = False
 
 
 def _enabled():
-    return os.environ.get("ASFP8_NEUTRALIZE_BLOCKSWAP", "on").lower() not in (
+    return _env.get("ASFP8_NEUTRALIZE_BLOCKSWAP", "on").lower() not in (
         "off", "0", "false", "no",
     )
 

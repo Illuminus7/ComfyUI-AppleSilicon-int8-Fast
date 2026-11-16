@@ -22,9 +22,9 @@ if __spec__ is not None and __spec__.parent:
         print(f"[AppleSilicon-int8-Fast] int4_linear_mps not present ({_e}); skipping.", flush=True)
 
     # bisection switches, by patch module name; ENABLE_ONLY wins if both are set
-    import os as _os
-    _only = {n.strip() for n in _os.environ.get("ASFP8_ENABLE_ONLY", "").split(",") if n.strip()}
-    _disabled = {n.strip() for n in _os.environ.get("ASFP8_DISABLE", "").split(",") if n.strip()}
+    from ._patches import _env
+    _only = {n.strip() for n in _env.get("ASFP8_ENABLE_ONLY", "").split(",") if n.strip()}
+    _disabled = {n.strip() for n in _env.get("ASFP8_DISABLE", "").split(",") if n.strip()}
 
     try:
         from ._patches import _caps

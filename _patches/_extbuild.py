@@ -9,6 +9,7 @@ import atexit
 import os
 import threading
 import time
+from . import _env
 
 # seconds for one cold build (ASFP8_EXT_BUILD_TIMEOUT; <=0 disables the watchdog)
 BUILD_TIMEOUT_DEFAULT = 600.0
@@ -16,7 +17,7 @@ BUILD_TIMEOUT_DEFAULT = 600.0
 
 def _build_timeout():
     try:
-        return float(os.environ.get("ASFP8_EXT_BUILD_TIMEOUT", BUILD_TIMEOUT_DEFAULT))
+        return float(_env.get("ASFP8_EXT_BUILD_TIMEOUT", BUILD_TIMEOUT_DEFAULT))
     except ValueError:
         return BUILD_TIMEOUT_DEFAULT
 

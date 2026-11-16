@@ -162,7 +162,13 @@ inline void quant8(const device T* x, device int8_t* x8, device float* xs, const
   float v[E];
   for (int e = 0; e < E; ++e) v[e] = float(xr[e]) - (has_mu ? mu[mb + e] : 0.0f);
   for (int s = 1; s < E; s <<= 1)
-    for (int e = 0; e < E; ++e) if (!(e & s)) { const float a = v[e], c = v[e + s]; v[e] = a + c; v[e + s] = a - c; }
+    for (int e = 0; e < E; ++e) {
+      if (!(e & s)) {
+        const float a = v[e], c = v[e + s];
+        v[e] = a + c;
+        v[e + s] = a - c;
+      }
+    }
   for (ushort s = 1; s < 32; s <<= 1)
     for (int e = 0; e < E; ++e) { const float o = simd_shuffle_xor(v[e], s); v[e] = (lane & s) ? o - v[e] : v[e] + o; }
   float amax = 0.0f;

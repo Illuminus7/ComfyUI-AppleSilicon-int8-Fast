@@ -33,6 +33,7 @@ import threading
 import time
 
 import torch
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/mmap_load]"
 
@@ -386,7 +387,7 @@ def install():
         return
     if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
         return
-    setting = os.environ.get("APPLESILICON_MMAP_LOAD", "auto").lower()
+    setting = _env.get("APPLESILICON_MMAP_LOAD", "auto").lower()
     if setting in ("off", "0", "false"):
         print(f"{TAG} disabled by APPLESILICON_MMAP_LOAD.")
         return

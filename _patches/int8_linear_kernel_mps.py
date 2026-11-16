@@ -11,6 +11,7 @@ import contextlib
 import sys
 
 import torch
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/int8_kernel]"
 
@@ -47,7 +48,8 @@ template <typename T>
 inline void load_group(const device T* x, uint lane, uint rotate, thread float (&v)[8]) {
   const device vec<T, 4>* xv = (const device vec<T, 4>*)(x + lane * 8);
   const float4 a = float4(xv[0]), b = float4(xv[1]);
-  v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w; v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w;
+  v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w;
+  v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w;
   if (rotate) hadamard256(v);
 }
 
@@ -409,7 +411,7 @@ def _dequant_enabled():
     global _DEQUANT_MODE
     if _DEQUANT_MODE is None:
         import os
-        v = os.environ.get("ASFP8_INT8_DEQUANT", "").strip().lower()
+        v = _env.get("ASFP8_INT8_DEQUANT", "").strip().lower()
         _DEQUANT_MODE = False
         if v in ("1", "on", "true"):
             try:

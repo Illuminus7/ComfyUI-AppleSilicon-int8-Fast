@@ -6,10 +6,10 @@ applies the weight scale and bias in fp32. That is a semantic change, not an equ
 it is closer to unquantized act x dequantized weight than the path it replaces. DEFAULT
 ON (ASFP8_FP8_NATIVE=off disables), and only fires on min_dim>=8192 layers.
 """
-import os
 import sys
 
 import torch
+from . import _env
 
 TAG = "[AppleSilicon-int8-Fast/fp8_kernel]"
 
@@ -23,7 +23,7 @@ _MIN_DIM_DEFAULT = 8192
 
 def _env_int(name, default):
     try:
-        return int(os.environ.get(name, str(default)))
+        return int(_env.get(name, str(default)))
     except (TypeError, ValueError):
         return default
 
@@ -35,7 +35,7 @@ def _min_dim():
 def _range_guard_on():
     # the kernel casts bf16 activations to fp16, so an outlier above 65504 would become
     # inf; =0 skips the per-call amax check
-    return os.environ.get("ASFP8_FP8_NATIVE_RANGE_GUARD", "1").strip().lower() not in (
+    return _env.get("ASFP8_FP8_NATIVE_RANGE_GUARD", "1").strip().lower() not in (
         "0", "off", "false", "no")
 
 

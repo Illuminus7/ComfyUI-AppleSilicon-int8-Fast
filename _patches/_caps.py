@@ -4,11 +4,11 @@ A perf patch is default-on only where the hardware/software can run it; an expli
 var always wins over the probe. See `resolve` for the three states.
 """
 
-import os
 import platform
 import threading
 
 import torch
+from . import _env
 
 # anything outside these vocabularies is treated as "unset"
 ON_TOKENS = ("1", "on", "true", "yes", "enable", "enabled")
@@ -166,7 +166,7 @@ def resolve(env_name, default_on, cap):
     `cap` is evaluated only when the env var is unset or unrecognised, so an explicit
     on/off never pays for a probe and forced-on wins over a failing probe.
     """
-    v = os.environ.get(env_name)
+    v = _env.get(env_name)
     if v is not None:
         t = v.strip().lower()
         if t in OFF_TOKENS:

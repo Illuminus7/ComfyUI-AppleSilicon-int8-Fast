@@ -29,6 +29,8 @@ Sample workflows for Krea 2, MiniMax H3 and LTX 2.5 are on Hugging Face: [Illumi
 - from the terminal: `INT8_ATTENTION=off python main.py`
 - ComfyUI Desktop: run `launchctl setenv INT8_ATTENTION off` in the terminal, then restart ComfyUI (`launchctl unsetenv INT8_ATTENTION` turns it back on).
 
+**Faster model loading** is on by default. When memory is tight, large models load without briefly taking twice their size in memory, which avoids swapping (on a 48 GB Mac, the first MiniMax H3 image takes about 30 seconds instead of 2 minutes). To turn it off, set `APPLESILICON_MMAP_LOAD=off` the same way.
+
 ### Krea 2
 
 `krea2_turbo_t2i.json` needs [rgthree-comfy](https://github.com/rgthree/rgthree-comfy), installable from ComfyUI Manager. Its LoRA stack is empty by default.

@@ -12,6 +12,8 @@ __all__ = [
     "ops_bias_fp8",
     "stochastic_round_fp8",
     "tensor_to_fp8",
+    "mmap_load_mps",
+    "mps_free_memory",
     "wan_blockswap_mps",
     "linear_fp8",
     "te_device_mps",

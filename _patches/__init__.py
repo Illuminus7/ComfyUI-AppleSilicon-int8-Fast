@@ -14,6 +14,7 @@ __all__ = [
     "tensor_to_fp8",
     "mmap_load_mps",
     "mps_free_memory",
+    "mps_orphan_gc",
     "wan_blockswap_mps",
     "linear_fp8",
     "te_device_mps",

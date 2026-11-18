@@ -15,6 +15,7 @@ __all__ = [
     "mmap_load_mps",
     "mps_free_memory",
     "mps_orphan_gc",
+    "mps_te_offload",
     "wan_blockswap_mps",
     "linear_fp8",
     "te_device_mps",

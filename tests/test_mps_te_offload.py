@@ -112,3 +112,24 @@ def test_nothing_to_offload_without_an_encoder(mm):
     mm.current_loaded_models[:] = [mm.vae]
     assert mps_te_offload._before_load(mm, [_Patcher(20 * GIB, "dit")], 133 * GIB, model_base) == 0
     assert mm.vae.unloads == 0
+
+
+@requires_mps
+def test_small_encoders_stay_loaded(mm):
+    small = _Loaded(_resident(4.6 * GIB, "te"))           # Krea 2's text encoder
+    mm.current_loaded_models[:] = [small, mm.vae]
+    dit = _Patcher(12 * GIB, "dit")
+    assert mps_te_offload._before_load(mm, [dit], 133 * GIB, model_base) == 0
+    assert small.unloads == 0 and mm.vae.unloads == 0
+    assert mps_te_offload._offloading is False
+
+
+@requires_mps
+def test_small_encoder_reload_leaves_the_diffusion_model(mm):
+    mps_te_offload._before_load(mm, [_Patcher(20 * GIB, "dit")], 133 * GIB, model_base)   # big encoder offloaded
+    assert mps_te_offload._offloading is True
+    dit_lm = _Loaded(_resident(20 * GIB, "dit"))
+    mm.current_loaded_models[:] = [dit_lm]
+    mm.held["bytes"] = 30 * GIB
+    assert mps_te_offload._before_load(mm, [_Patcher(4.6 * GIB, "te")], 0, model_base) == 0
+    assert dit_lm.unloads == 0

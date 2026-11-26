@@ -18,7 +18,8 @@ between the model's, where they cannot be returned later. So while the encoder i
 offloaded, its next load unloads the diffusion model first when the two would not fit in 60%
 of RAM (mmap_load's rule); the model reloads from the file in seconds.
 
-Images are not affected: their sampling estimate is small, so the encoder stays loaded. The
+Only large text encoders (8 GiB or more, such as MiniMax H3's) are offloaded: reloading a small
+one, such as Krea 2's 4.6 GB, for every new prompt would cost more than the room it frees. The
 model objects stay cached either way, so this works the same with --cache-classic,
 --cache-lru, --cache-none and the default cache.
 
@@ -39,7 +40,8 @@ _mode = "auto"
 _limit = 0
 _ram = 0
 _TIGHT_FRACTION = 0.6    # of physical RAM, as in mmap_load
-_offloading = False      # the last diffusion load offloaded the encoder
+_MIN_ENCODER = 8 << 30   # text encoders smaller than this stay loaded
+_offloading = False      # the last diffusion load offloaded a large encoder
 
 
 def _on_mps(lm):
@@ -89,20 +91,23 @@ def _before_load(mm, requested, memory_required, model_base):
     on_mps = [p for p in requested if getattr(p.load_device, "type", None) == "mps"]
 
     if any(_is_diffusion(p, model_base) for p in on_mps):
+        _offloading = False
         need = torch.mps.driver_allocated_memory() + _incoming(on_mps) + memory_required
-        _offloading = _mode == "on" or need > _limit
-        if not _offloading:
+        if _mode != "on" and need <= _limit:
             return 0
         targets = _loaded(mm, keep, lambda p: not _is_diffusion(p, model_base))
-        if not any(getattr(lm.model, "is_clip", False) for lm in targets):
+        encoders = [lm for lm in targets if getattr(lm.model, "is_clip", False)]
+        if not encoders or (_mode != "on" and max(lm.model.model_size() for lm in encoders) < _MIN_ENCODER):
             return 0
+        _offloading = True
         freed = _unload(mm, targets)
         if freed:
             print(f"{TAG} unloaded the text encoder and helpers ({freed / 2**30:.1f} GiB) "
                   f"before sampling.", flush=True)
         return freed
 
-    if _offloading and any(getattr(p, "is_clip", False) for p in on_mps):
+    encoders = [p for p in on_mps if getattr(p, "is_clip", False)]
+    if _offloading and encoders and (_mode == "on" or max(p.model_size() for p in encoders) >= _MIN_ENCODER):
         tight = _TIGHT_FRACTION * _ram
         if _mode != "on" and torch.mps.driver_allocated_memory() + _incoming(on_mps) <= tight:
             return 0

@@ -163,7 +163,9 @@ inline void i8mm(device int8_t* A, device int8_t* B, device OutT* D, const devic
     auto b = tB.slice<BK, BN>(k0, 0);
     op.run(a, b, c);
   }
-  // the store stays inline with one base pointer: through i8mm_store it costs this kernel ~20%
+  // the store stays inline with one base pointer: through i8mm_store it costs this kernel ~20%.
+  // Every scale and bias is read before the first store: the compiler can't rule out D aliasing
+  // them, so reads interleaved with stores were redone after each one (bias layers ran 1.2-1.4x slower).
   device OutT* Dp = D + ulong(m0) * N + n0;
   #pragma clang loop unroll(full)
   for (uint16_t i = 0; i < c.get_capacity(); ++i) {
@@ -171,7 +173,14 @@ inline void i8mm(device int8_t* A, device int8_t* B, device OutT* D, const devic
       auto idx = c.get_multidimensional_index(i);
       float y = float(c[i]) * a_scale[m0 + idx[1]] * w_scale[PER_N ? n0 + idx[0] : 0];
       if (BIAS) y += float(bias[n0 + idx[0]]);
-      Dp[ulong(idx[1]) * N + idx[0]] = OutT(y);
+      c[i] = as_type<int>(y);
+    }
+  }
+  #pragma clang loop unroll(full)
+  for (uint16_t i = 0; i < c.get_capacity(); ++i) {
+    if (c.is_valid_element(i)) {
+      auto idx = c.get_multidimensional_index(i);
+      Dp[ulong(idx[1]) * N + idx[0]] = OutT(as_type<float>(c[i]));
     }
   }
 }
